@@ -1,0 +1,211 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[35]:
+
+
+import sys
+#parse args to variables
+try:
+    script = sys.argv[0]
+    database = sys.argv[1]
+    server = sys.argv[2]
+    auditKey = sys.argv[3]
+    username = sys.argv[4]
+    password = sys.argv[5]
+    loadtype= sys.argv[6]
+    table = sys.argv[7]
+except Exception:
+    database = "Enter Database Name"
+    server = "Enter Server Name"
+    auditKey = "Enter Your Audit Key"
+    username = "Enter applicationID from Azure APP"
+    password = "Enter password from Azure APP"
+    loadtype="Enter Load type"
+
+
+# In[36]:
+
+
+def errorLog(engine, auditKey, e, detail=""):
+    import datetime
+    error_message = str(e).replace("'", "''") + detail
+    sql = f"""INSERT INTO log.Error 
+                (Audit_Key, [Error Code], [Error Description], [Date Time], [Package Name], [Source Name], [Source Description])
+              VALUES 
+                ('{auditKey}', 0, '{error_message}', '{datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}', 'Execute External Job', 'Execute External Job', 'Execute External Job')
+            """
+    with engine.begin() as conn:
+        conn.execute(sa.text(sql))
+    raise e
+
+
+# In[37]:
+
+
+#Import pyodbc to determine available drivers
+import pyodbc
+#find the best driver available
+driver_name = ''
+driver_names = [x for x in pyodbc.drivers() if x.endswith(' for SQL Server')]
+if driver_names:
+    driver_name = driver_names[0]
+else:
+    print('(No suitable driver found. Cannot connect.)')
+    
+#Import sql alchemy to enable connection
+import sqlalchemy as sa
+#Create a sql engine
+from sqlalchemy.engine import URL
+connection_string = "DRIVER={" + driver_name + "};SERVER=" + server + ";DATABASE=" + database + ";trusted_connection=yes"
+#connection_string = "DRIVER={SQL Server Native Client 11.0};Data Source=" + server + ";Initial Catalog=" + database + ";"
+connection_url = URL.create("mssql+pyodbc", query={"odbc_connect": connection_string})
+
+engine = sa.create_engine(connection_url)
+
+
+# In[38]:
+
+
+try:
+    import datetime
+    
+    from datetime import timedelta
+    from datetime  import date
+    from datetime import datetime
+    import pandas as pd
+    from azure.identity import ClientSecretCredential
+    import json
+    import requests
+    from sqlalchemy import create_engine, text, MetaData
+    import numpy as np
+    import urllib.parse
+    import base64
+    from jira import JIRA
+    from bs4 import BeautifulSoup
+except Exception as e:
+    errorLog(engine,auditKey,e)
+    raise e
+
+
+# In[50]:
+
+
+
+
+try:
+   # Define the page access token and page ID
+    page_access_token = 'Enter Page Access Token'
+    page_id = 'Enter Page ID'
+
+    # Define the fields you want to retrieve
+    fields = 'id,message,created_time,shares,comments,reactions.type(LIKE).limit(0).summary(total_count),status_type,attachments'
+
+    # Define the base URL for metrics
+    metrics_base_url = 'https://graph.facebook.com/v18.0/'
+
+    # Get all posts (no need to filter by year)
+    all_posts = []
+
+    # Initial request to get the first page of posts
+    base_url = f'{metrics_base_url}{page_id}/feed'
+    url = f'{base_url}?fields={fields}&access_token={page_access_token}'
+    response = requests.get(url)
+
+    # Check if the request was successful
+    if response.status_code == 200:
+        page_posts = response.json()
+        posts_data = page_posts.get('data', [])
+
+        all_posts.extend(posts_data)
+
+        # Continue retrieving next pages if available
+        while 'next' in page_posts.get('paging', {}):
+            next_url = page_posts['paging']['next']
+            response = requests.get(next_url)
+            if response.status_code == 200:
+                page_posts = response.json()
+                posts_data = page_posts.get('data', [])
+                all_posts.extend(posts_data)
+            else:
+                break
+
+        # Create a DataFrame for all posts
+        df = pd.DataFrame(all_posts)
+        df['shares'] = df['shares'].apply(lambda x: x.get('count', 0) if isinstance(x, dict) else 0)
+        def extract_likes_count(x):
+            if isinstance(x, dict):
+                summary = x.get('summary', {})
+                return summary.get('total_count', 0)
+            return 0
+
+        
+        df['comments'] = df['comments'].apply(lambda x: len(x['data']) if isinstance(x, dict) and 'data' in x else 0)
+        df['reactions'] = df['reactions'].apply(extract_likes_count) 
+        df['Pull Date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Drop rows with N/A in the 'message' column
+        df.dropna(subset=['message'], inplace=True)
+        df.rename(columns={'reactions': 'likes'}, inplace=True)
+    
+
+
+    fields = 'id,title,description,created_time,source,thumbnail,views'
+
+    # Define the base URL for video retrieval
+    video_base_url = f'https://graph.facebook.com/v18.0/{page_id}/videos'
+
+    # Initialize a list to store video data
+    all_videos = []
+
+    # Initial request to get the first page of videos
+    url = f'{video_base_url}?fields={fields}&access_token={page_access_token}'
+    response = requests.get(url)
+
+    # Check if the request was successful
+    if response.status_code == 200:
+        videos_data = response.json()
+        all_videos.extend(videos_data.get('data', []))
+
+        # Continue retrieving next pages if available
+        while 'next' in videos_data.get('paging', {}):
+            next_url = videos_data['paging']['next']
+            response = requests.get(next_url)
+            if response.status_code == 200:
+                videos_data = response.json()
+                all_videos.extend(videos_data.get('data', []))
+            else:
+                break
+
+    # Create a DataFrame from the video data
+    video_df = pd.DataFrame(all_videos)
+
+    merged_df = df.merge(video_df, left_on='message', right_on='description', how='left')
+
+
+    merged_df=merged_df[['id_x','message','created_time_x','shares','likes','comments','status_type','views','Pull Date']]
+    merged_df['status_type'] = merged_df['status_type'].replace({'added_photos': 'IMAGE', 'added_video': 'VIDEO'})
+
+    merged_df = merged_df.rename(columns={'id_x': 'id', 'created_time_x': 'created_time','views':'video_views','status_type':'media_type'})
+
+except Exception as e:
+    errorLog(engine, auditKey, e)
+    raise e
+
+
+# In[42]:
+
+
+try:
+         merged_df.to_sql(
+            name ="Enter Table Name", 
+            schema ="Enter Schema", 
+            con=engine, 
+            index=False, 
+            if_exists = "append"
+        )
+except Exception as e:
+    errorLog(engine, e)
+    raise e
+
+print('code uploaded successfully')
